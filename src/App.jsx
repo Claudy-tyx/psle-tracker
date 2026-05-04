@@ -11,8 +11,21 @@ import {
 } from "firebase/firestore";
 import { db } from "./firebase";
 import "./App.css";
+import imageCompression from "browser-image-compression";
 
 const PSLE_DATE = "2026-09-24";
+
+const PSLE_EXAMS = [
+  { title: "English Paper 1", date: "2026-09-24" },
+  { title: "English Paper 2", date: "2026-09-24" },
+  { title: "Math Paper 1", date: "2026-09-25" },
+  { title: "Math Paper 2", date: "2026-09-25" },
+  { title: "Science", date: "2026-09-29" },
+  { title: "Mother Tongue Paper 1", date: "2026-10-01" },
+  { title: "Mother Tongue Paper 2", date: "2026-10-01" },
+  { title: "Listening Comprehension", date: "2026-09-16" },
+  { title: "Oral", date: "2026-08-13" },
+];
 
 function getTodayKey() {
   return new Date().toISOString().split("T")[0];
@@ -30,8 +43,8 @@ function App() {
     () => localStorage.getItem("selectedChildId") || ""
   );
   const [role, setRole] = useState(() => localStorage.getItem("role") || "");
-  const [createdFamilyCode, setCreatedFamilyCode] = useState("");
 
+  const [setupMode, setSetupMode] = useState("");
   const [familyName, setFamilyName] = useState("");
   const [familyPassword, setFamilyPassword] = useState("");
   const [joinFamilyId, setJoinFamilyId] = useState("");
@@ -43,7 +56,6 @@ function App() {
 
   const [tasks, setTasks] = useState([]);
   const [history, setHistory] = useState({});
-  const [psleDates, setPsleDates] = useState([]);
 
   const [newTask, setNewTask] = useState("");
   const [newSubject, setNewSubject] = useState("Homework");
@@ -51,14 +63,12 @@ function App() {
   const [newInstructions, setNewInstructions] = useState("");
   const [photoRequired, setPhotoRequired] = useState(false);
 
-  const [newExamTitle, setNewExamTitle] = useState("");
-  const [newExamDate, setNewExamDate] = useState("");
-
   const [selectedMonth, setSelectedMonth] = useState(new Date());
   const [selectedDate, setSelectedDate] = useState(null);
   const [restReason, setRestReason] = useState("");
 
   const [activeModal, setActiveModal] = useState(null);
+  const [notice, setNotice] = useState(null);
 
   const selectedChild = children.find((child) => child.id === selectedChildId);
 
@@ -66,8 +76,40 @@ function App() {
     (new Date(PSLE_DATE) - new Date()) / (1000 * 60 * 60 * 24)
   );
 
+  function showNotice(title, message, onClose) {
+    setNotice({ title, message, onClose });
+  }
+
+  function closeNotice() {
+    const callback = notice?.onClose;
+    setNotice(null);
+
+    if (callback) {
+      callback();
+    }
+  }
+
+  async function generateUniqueFamilyCode() {
+    let code = makeFamilyCode();
+    let exists = await getDoc(doc(db, "families", code));
+
+    while (exists.exists()) {
+      code = makeFamilyCode();
+      exists = await getDoc(doc(db, "families", code));
+    }
+
+    return code;
+  }
+
   useEffect(() => {
     if (!familyId) return;
+
+    const unsubFamily = onSnapshot(doc(db, "families", familyId), (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.data();
+        setFamilyName(data.familyName || "");
+      }
+    });
 
     const unsubChildren = onSnapshot(
       collection(db, "families", familyId, "children"),
@@ -88,7 +130,10 @@ function App() {
       }
     );
 
-    return () => unsubChildren();
+    return () => {
+      unsubFamily();
+      unsubChildren();
+    };
   }, [familyId]);
 
   useEffect(() => {
@@ -112,15 +157,6 @@ function App() {
       "dailyLogs"
     );
 
-    const pslePath = collection(
-      db,
-      "families",
-      familyId,
-      "children",
-      selectedChildId,
-      "psleDates"
-    );
-
     const unsubTasks = onSnapshot(taskPath, (snapshot) => {
       const loadedTasks = snapshot.docs.map((docItem) => ({
         id: docItem.id,
@@ -140,19 +176,9 @@ function App() {
       setHistory(logs);
     });
 
-    const unsubPsleDates = onSnapshot(pslePath, (snapshot) => {
-      const dates = snapshot.docs.map((docItem) => ({
-        id: docItem.id,
-        ...docItem.data(),
-      }));
-
-      setPsleDates(dates);
-    });
-
     return () => {
       unsubTasks();
       unsubLogs();
-      unsubPsleDates();
     };
   }, [familyId, selectedChildId]);
 
@@ -172,25 +198,31 @@ function App() {
 
   async function createFamily() {
     if (!familyName.trim() || !familyPassword.trim()) {
-      alert("Enter family name and password.");
+      showNotice("Missing Details", "Please enter a family name and password.");
       return;
     }
 
-    const code = makeFamilyCode();
+    const code = await generateUniqueFamilyCode();
 
     await setDoc(doc(db, "families", code), {
-      familyName,
+      familyName: familyName.trim(),
       password: familyPassword,
       createdAt: new Date().toISOString(),
     });
 
-    // ONLY show popup first
-    setCreatedFamilyCode(code);
+    showNotice(
+      "Family Created!",
+      `Your family code is ${code}. Save this code because other devices need it to join your family.`,
+      () => {
+        setFamilyId(code);
+        localStorage.setItem("familyId", code);
+      }
+    );
   }
 
   async function joinFamily() {
     if (!joinFamilyId.trim() || !joinPassword.trim()) {
-      alert("Enter family code and password.");
+      showNotice("Missing Details", "Please enter the family code and password.");
       return;
     }
 
@@ -199,27 +231,30 @@ function App() {
     const familySnap = await getDoc(familyRef);
 
     if (!familySnap.exists()) {
-      alert("Family not found.");
+      showNotice("Family Not Found", "Check that the family code is correct.");
       return;
     }
 
     if (familySnap.data().password !== joinPassword) {
-      alert("Wrong password.");
+      showNotice("Wrong Password", "The parent password is incorrect.");
       return;
     }
 
     setFamilyId(code);
     localStorage.setItem("familyId", code);
-    alert("Joined family!");
+    showNotice("Joined Family", "This device is now connected to the family.");
   }
 
   async function addChild() {
-    if (!newChildName.trim()) return;
+    if (!newChildName.trim()) {
+      showNotice("Missing Name", "Please enter the child name.");
+      return;
+    }
 
     const childRef = await addDoc(
       collection(db, "families", familyId, "children"),
       {
-        name: newChildName,
+        name: newChildName.trim(),
         createdAt: new Date().toISOString(),
       }
     );
@@ -227,14 +262,17 @@ function App() {
     setSelectedChildId(childRef.id);
     localStorage.setItem("selectedChildId", childRef.id);
     setNewChildName("");
+    setActiveModal(null);
+
+    showNotice("Child Added", "The child profile has been created.");
   }
 
-  async function enterAsOrganizer() {
+  async function enterAsParent() {
     const familyRef = doc(db, "families", familyId);
     const familySnap = await getDoc(familyRef);
 
     if (!familySnap.exists()) {
-      alert("Family not found.");
+      showNotice("Family Not Found", "Please rejoin or recreate the family.");
       return;
     }
 
@@ -242,13 +280,13 @@ function App() {
       setRole("organizer");
       setPassword("");
     } else {
-      alert("Wrong password.");
+      showNotice("Wrong Password", "The parent password is incorrect.");
     }
   }
 
   function enterAsChild() {
     if (!selectedChildId) {
-      alert("Choose a child profile first.");
+      showNotice("No Child Selected", "Please choose a child profile first.");
       return;
     }
 
@@ -269,10 +307,16 @@ function App() {
     setSelectedChildId("");
     setRole("");
     setChildren([]);
+    setTasks([]);
+    setHistory({});
+    setSetupMode("");
   }
 
   async function addTask() {
-    if (!newTask.trim() || !selectedChildId) return;
+    if (!newTask.trim() || !selectedChildId) {
+      showNotice("Missing Task", "Please enter a task name.");
+      return;
+    }
 
     await addDoc(
       collection(
@@ -284,7 +328,7 @@ function App() {
         "tasks"
       ),
       {
-        name: newTask,
+        name: newTask.trim(),
         subject: newSubject,
         dueDate: newDueDate,
         instructions: newInstructions,
@@ -303,6 +347,8 @@ function App() {
     setNewInstructions("");
     setPhotoRequired(false);
     setActiveModal(null);
+
+    showNotice("Task Added", "The work has been assigned.");
   }
 
   async function toggleTask(task) {
@@ -351,6 +397,13 @@ function App() {
         approved: status,
       }
     );
+
+    showNotice(
+      status === "approved" ? "Approved" : "Rejected",
+      status === "approved"
+        ? "The submitted work has been approved."
+        : "The submitted work has been rejected."
+    );
   }
 
   async function handleImageUpload(event, task) {
@@ -358,27 +411,39 @@ function App() {
     if (!file) return;
 
     const todayKey = getTodayKey();
-    const reader = new FileReader();
 
-    reader.onloadend = async () => {
-      await updateDoc(
-        doc(
-          db,
-          "families",
-          familyId,
-          "children",
-          selectedChildId,
-          "tasks",
-          task.id
-        ),
-        {
-          image: reader.result,
-          imageDate: todayKey,
-        }
-      );
-    };
+    try {
+      const compressedFile = await imageCompression(file, {
+        maxSizeMB: 0.2,
+        maxWidthOrHeight: 800,
+        useWebWorker: true,
+      });
 
-    reader.readAsDataURL(file);
+      const reader = new FileReader();
+
+      reader.onloadend = async () => {
+        await updateDoc(
+          doc(
+            db,
+            "families",
+            familyId,
+            "children",
+            selectedChildId,
+            "tasks",
+            task.id
+          ),
+          {
+            image: reader.result,
+            imageDate: todayKey,
+            approved: "pending",
+          }
+        );
+      };
+
+      reader.readAsDataURL(compressedFile);
+    } catch (error) {
+      showNotice("Upload Failed", "Photo compression failed. Try another image.");
+    }
   }
 
   async function submitDay() {
@@ -428,7 +493,7 @@ function App() {
       }
     );
 
-    alert("Day submitted!");
+    showNotice("Day Submitted", "Today's progress has been saved.");
   }
 
   async function markRestDay() {
@@ -463,43 +528,7 @@ function App() {
 
     setRestReason("");
     setActiveModal(null);
-    alert("Marked as rest day!");
-  }
-
-  async function addPsleDate() {
-    if (!newExamTitle.trim() || !newExamDate) return;
-
-    await addDoc(
-      collection(
-        db,
-        "families",
-        familyId,
-        "children",
-        selectedChildId,
-        "psleDates"
-      ),
-      {
-        title: newExamTitle,
-        date: newExamDate,
-      }
-    );
-
-    setNewExamTitle("");
-    setNewExamDate("");
-  }
-
-  async function deletePsleDate(dateId) {
-    await deleteDoc(
-      doc(
-        db,
-        "families",
-        familyId,
-        "children",
-        selectedChildId,
-        "psleDates",
-        dateId
-      )
-    );
+    showNotice("Rest Day Saved", "Today has been marked as a rest day.");
   }
 
   function changeMonth(amount) {
@@ -523,7 +552,7 @@ function App() {
         day,
         dateKey,
         log: history[dateKey],
-        exams: psleDates.filter((item) => item.date === dateKey),
+        exams: PSLE_EXAMS.filter((exam) => exam.date === dateKey),
       };
     });
   }
@@ -574,80 +603,120 @@ function App() {
     year: "numeric",
   });
 
+  function NoticeModal() {
+    if (!notice) return null;
+
+    return (
+      <div className="modal-backdrop">
+        <div className="modal-card notice-card">
+          <h2>{notice.title}</h2>
+          <p>{notice.message}</p>
+
+          {notice.message?.includes("family code") && (
+            <button
+              className="secondary-button"
+              onClick={() => {
+                const code = notice.message.match(/[A-Z0-9]{6}/)?.[0];
+                if (code) navigator.clipboard.writeText(code);
+              }}
+            >
+              Copy Code
+            </button>
+          )}
+
+          <button onClick={closeNotice}>Got it</button>
+        </div>
+      </div>
+    );
+  }
+
   if (!familyId) {
     return (
       <div className="app">
         <h1>PSLE Progress Tracker</h1>
 
-        <div className="card">
-          <h2>Create New Family</h2>
+        {!setupMode && (
+          <div className="card welcome-card">
+            <h2>Welcome</h2>
+            <p className="task-detail">
+              Create a new family or join an existing one.
+            </p>
 
-          <input
-            className="text-input"
-            type="text"
-            placeholder="Family name (e.g. Tan Family)"
-            value={familyName}
-            onChange={(event) => setFamilyName(event.target.value)}
-          />
-
-          <input
-            className="text-input"
-            type="password"
-            placeholder="Create parent password"
-            value={familyPassword}
-            onChange={(event) => setFamilyPassword(event.target.value)}
-          />
-
-          <button onClick={createFamily}>Create Family</button>
-        </div>
-
-        <div className="card">
-          <h2>Join Existing Family</h2>
-
-          <input
-            className="text-input"
-            type="text"
-            placeholder="Family code"
-            value={joinFamilyId}
-            onChange={(event) => setJoinFamilyId(event.target.value)}
-          />
-
-          <input
-            className="text-input"
-            type="password"
-            placeholder="Parent password"
-            value={joinPassword}
-            onChange={(event) => setJoinPassword(event.target.value)}
-          />
-
-          <button onClick={joinFamily}>Join Family</button>
-        </div>
-
-        {createdFamilyCode && (
-          <div className="modal-backdrop">
-            <div className="modal-card">
-              <h2>Family Created!</h2>
-
-              <p>This is your family code:</p>
-
-              <h1>{createdFamilyCode}</h1>
-
-              <p className="task-detail">
-                Save this code. Other devices need it to join your family.
-              </p>
-
+            <div className="auth-actions">
+              <button onClick={() => setSetupMode("create")}>
+                Create Family
+              </button>
               <button
-                onClick={() => {
-                  setFamilyId(createdFamilyCode);
-                  localStorage.setItem("familyId", createdFamilyCode);
-                  setCreatedFamilyCode("");
-                }}
+                className="secondary-button"
+                onClick={() => setSetupMode("join")}
               >
-                Got it
+                Join Family
               </button>
             </div>
           </div>
         )}
+
+        {setupMode === "create" && (
+          <div className="card">
+            <h2>Create New Family</h2>
+
+            <input
+              className="text-input"
+              type="text"
+              placeholder="Family name, e.g. Tan Family"
+              value={familyName}
+              onChange={(event) => setFamilyName(event.target.value)}
+            />
+
+            <input
+              className="text-input"
+              type="password"
+              placeholder="Create parent password"
+              value={familyPassword}
+              onChange={(event) => setFamilyPassword(event.target.value)}
+            />
+
+            <button onClick={createFamily}>Create Family</button>
+            <button
+              className="ghost-button"
+              onClick={() => setSetupMode("")}
+            >
+              Back
+            </button>
+          </div>
+        )}
+
+        {setupMode === "join" && (
+          <div className="card">
+            <h2>Join Existing Family</h2>
+
+            <input
+              className="text-input"
+              type="text"
+              placeholder="Family code"
+              value={joinFamilyId}
+              onChange={(event) => setJoinFamilyId(event.target.value)}
+            />
+
+            <input
+              className="text-input"
+              type="password"
+              placeholder="Parent password"
+              value={joinPassword}
+              onChange={(event) => setJoinPassword(event.target.value)}
+            />
+
+            <button onClick={joinFamily}>Join Family</button>
+            <button
+              className="ghost-button"
+              onClick={() => setSetupMode("")}
+            >
+              Back
+            </button>
+          </div>
+        )}
+
+        <NoticeModal />
       </div>
     );
   }
@@ -655,17 +724,22 @@ function App() {
   if (!role) {
     return (
       <div className="app">
-        <h1>PSLE Progress Tracker</h1>
+        <h1>{familyName || "Family"}</h1>
 
         <div className="card countdown">
-          <h2>Family Code: {familyId}</h2>
-          <p>Save this code to connect another device.</p>
+          <h2>Family Code</h2>
+          <p className="family-code">{familyId}</p>
+          <p className="task-detail">Use this code to connect another device.</p>
         </div>
 
         <div className="card">
           <h2>Select Child</h2>
 
-          {children.length === 0 && <p>No child profiles yet.</p>}
+          {children.length === 0 && (
+            <p className="no-data">
+              No child profiles yet. Enter Parent Mode to add one.
+            </p>
+          )}
 
           {children.length > 0 && (
             <select
@@ -681,11 +755,11 @@ function App() {
             </select>
           )}
 
-          <button onClick={enterAsChild}>Enter as Child</button>
+          <button onClick={enterAsChild}>Child Mode</button>
         </div>
 
         <div className="card">
-          <h2>Parent Login</h2>
+          <h2>Parent Mode</h2>
 
           <input
             className="text-input"
@@ -695,55 +769,32 @@ function App() {
             onChange={(event) => setPassword(event.target.value)}
           />
 
-          <button onClick={enterAsOrganizer}>Enter as Parent</button>
+          <button onClick={enterAsParent}>Enter Parent Mode</button>
         </div>
 
         <button className="logout-button" onClick={leaveFamily}>
           Leave Family
         </button>
+
+        <NoticeModal />
       </div>
     );
   }
 
   return (
     <div className="app">
-      <h1>{selectedChild?.name || "Child"} Dashboard</h1>
+      <h1>{selectedChild?.name || "Child"}</h1>
 
       <p className="role-text">
-        Logged in as: <strong>{role === "organizer" ? "parent" : "child"}</strong>
+        {role === "organizer" ? "Parent Mode" : "Child Mode"}
       </p>
 
       <button className="logout-button" onClick={logout}>
         Switch Profile
       </button>
 
-      {role === "organizer" && (
-        <div className="card parent-tools">
-          <h2>Parent Tools</h2>
-          <p className="task-detail">Family Code: {familyId}</p>
-
-          <select
-            className="text-input"
-            value={selectedChildId}
-            onChange={(event) => setSelectedChildId(event.target.value)}
-          >
-            {children.map((child) => (
-              <option key={child.id} value={child.id}>
-                {child.name}
-              </option>
-            ))}
-          </select>
-
-          <div className="tool-grid">
-            <button onClick={() => setActiveModal("addChild")}>Add Child</button>
-            <button onClick={() => setActiveModal("addWork")}>Add Work</button>
-            <button onClick={() => setActiveModal("restDay")}>Rest Day</button>
-            <button onClick={() => setActiveModal("psleDates")}>PSLE Dates</button>
-          </div>
-        </div>
-      )}
-
       <div className="card countdown">
+        <p className="eyebrow">Countdown</p>
         <h2>{daysLeft} days to PSLE</h2>
         <p>{selectedChild?.name || "No child selected"}</p>
       </div>
@@ -764,6 +815,18 @@ function App() {
                 </p>
               )}
             </div>
+
+            {PSLE_EXAMS.filter((exam) => exam.date === selectedDate).length >
+              0 && (
+              <div className="task-detail-card exam-detail">
+                <strong>PSLE Date</strong>
+                {PSLE_EXAMS.filter((exam) => exam.date === selectedDate).map(
+                  (exam) => (
+                    <p key={exam.title}>📌 {exam.title}</p>
+                  )
+                )}
+              </div>
+            )}
 
             {history[selectedDate] ? (
               <>
@@ -800,21 +863,29 @@ function App() {
         </div>
 
         <div className="calendar">
-          {calendarDays.map((item) => (
-            <div
-              className={`day ${item.log?.status || ""}`}
-              key={item.dateKey}
-              onClick={() => setSelectedDate(item.dateKey)}
-            >
-              <span>{item.day}</span>
+          {calendarDays.map((item) => {
+            const isToday = item.dateKey === getTodayKey();
+            const hasExam = item.exams.length > 0;
+            const isSelected = selectedDate === item.dateKey;
 
-              {item.exams.map((exam) => (
-                <small className="exam-badge" key={exam.id}>
-                  {exam.title}
-                </small>
-              ))}
-            </div>
-          ))}
+            return (
+              <div
+                className={`day ${item.log?.status || ""} ${
+                  isToday ? "today" : ""
+                } ${hasExam ? "exam" : ""} ${isSelected ? "selected" : ""}`}
+                key={item.dateKey}
+                onClick={() => setSelectedDate(item.dateKey)}
+              >
+                <span>{item.day}</span>
+
+                {item.exams.map((exam) => (
+                  <small className="exam-badge" key={exam.title}>
+                    {exam.title}
+                  </small>
+                ))}
+              </div>
+            );
+          })}
         </div>
 
         <p className="legend">
@@ -823,17 +894,47 @@ function App() {
       </div>
 
       <div className="card streak">
-        <h2>🔥 Streak</h2>
-        <p>Current: {currentStreak} days</p>
+        <p className="eyebrow">Consistency</p>
+        <h2>🔥 {currentStreak} day streak</h2>
         <p>Best: {bestStreak} days</p>
       </div>
+
+      {role === "organizer" && (
+        <div className="card parent-tools">
+          <h2>Parent Tools</h2>
+
+          <p className="task-detail">Family Code: {familyId}</p>
+
+          <select
+            className="text-input"
+            value={selectedChildId}
+            onChange={(event) => setSelectedChildId(event.target.value)}
+          >
+            {children.map((child) => (
+              <option key={child.id} value={child.id}>
+                {child.name}
+              </option>
+            ))}
+          </select>
+
+          <div className="tool-grid">
+            <button onClick={() => setActiveModal("addChild")}>Add Child</button>
+            <button onClick={() => setActiveModal("addWork")}>Add Work</button>
+            <button onClick={() => setActiveModal("restDay")}>Rest Day</button>
+          </div>
+        </div>
+      )}
 
       <div className="card">
         <h2>Today’s Check-In</h2>
 
+        {tasks.length === 0 && (
+          <p className="no-data">No tasks assigned yet.</p>
+        )}
+
         {tasks.map((task) => (
           <div className="task-row" key={task.id}>
-            <div className="task-card">
+            <div className={`task-card ${task.done ? "task-done" : ""}`}>
               <input
                 className="task-checkbox"
                 type="checkbox"
@@ -1022,73 +1123,11 @@ function App() {
                 <button onClick={markRestDay}>Mark Today as Rest Day</button>
               </>
             )}
-
-            {activeModal === "psleDates" && (
-              <>
-                <h2>PSLE Calendar Dates</h2>
-
-                <input
-                  className="text-input"
-                  type="text"
-                  placeholder="Example: English Paper"
-                  value={newExamTitle}
-                  onChange={(event) => setNewExamTitle(event.target.value)}
-                />
-
-                <input
-                  className="text-input"
-                  type="date"
-                  value={newExamDate}
-                  onChange={(event) => setNewExamDate(event.target.value)}
-                />
-
-                <button onClick={addPsleDate}>Add PSLE Date</button>
-
-                {psleDates.map((item) => (
-                  <div className="exam-row" key={item.id}>
-                    <span>
-                      {item.date} — {item.title}
-                    </span>
-
-                    <button
-                      className="delete-button"
-                      onClick={() => deletePsleDate(item.id)}
-                    >
-                      ✕
-                    </button>
-                  </div>
-                ))}
-              </>
-            )}
           </div>
         </div>
       )}
 
-      {createdFamilyCode && (
-        <div className="modal-backdrop">
-          <div className="modal-card">
-            <h2>Family Created!</h2>
-
-            <p>This is your family code:</p>
-
-            <h1>{createdFamilyCode}</h1>
-
-            <p className="task-detail">
-              Save this code. Other devices need it to join your family.
-            </p>
-
-            <button
-              onClick={() => {
-                setFamilyId(createdFamilyCode);
-                localStorage.setItem("familyId", createdFamilyCode);
-                setCreatedFamilyCode("");
-              }}
-            >
-              Got it
-            </button>
-          </div>
-        </div>
-      )}
+      <NoticeModal />
     </div>
   );
 }
